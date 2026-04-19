@@ -16,6 +16,7 @@ def init_db():
             company TEXT NOT NULL,
             title TEXT NOT NULL,
             date_applied TEXT,
+            next_appt_date TEXT,
             salary_range TEXT,
             location TEXT,
             contact_name TEXT,
@@ -28,6 +29,13 @@ def init_db():
             is_archived INTEGER DEFAULT 0
         )
     ''')
+    
+    # SMART MIGRATION: Add 'next_appt_date' if updating from an older version
+    cursor.execute("PRAGMA table_info(applications)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if 'next_appt_date' not in columns:
+        cursor.execute("ALTER TABLE applications ADD COLUMN next_appt_date TEXT")
+        
     conn.commit()
     conn.close()
 
@@ -45,8 +53,30 @@ def auto_archive_rejected():
 init_db()
 auto_archive_rejected()
 
+# --- RESPONSIVE CSS INJECTION ---
+st.markdown("""
+<style>
+    /* Make the main container padding responsive */
+    @media (max-width: 768px) {
+        .block-container {
+            padding-left: 1rem !important;
+            padding-right: 1rem !important;
+            padding-top: 2rem !important;
+        }
+        /* Make buttons full width on mobile */
+        div.stButton > button {
+            width: 100% !important;
+        }
+    }
+    /* Ensure data table doesn't break layout on mobile */
+    .stDataFrame {
+        overflow-x: auto !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # --- STREAMLIT UI ---
-st.set_page_config(page_title="Job Tracker", layout="wide")
+st.set_page_config(page_title="Job Tracker", layout="wide", initial_sidebar_state="collapsed")
 st.title("💼 Job Application Tracker")
 
 # Create tabs
@@ -59,21 +89,33 @@ with tab1:
     conn.close()
     
     if not df.empty:
+        # Reordered columns: Most important first for mobile horizontal scrolling
+        display_cols = ['company', 'title', 'status', 'next_appt_date', 'date_applied', 'interview_stage', 'salary_range', 'location']
         st.dataframe(
-            df[['company', 'title', 'date_applied', 'status', 'interview_stage', 'salary_range', 'location']],
+            df[display_cols],
             use_container_width=True,
-            hide_index=True
+            hide_index=True,
+            column_config={
+                "next_appt_date": st.column_config.DateColumn("Next Appt. Date"),
+                "date_applied": st.column_config.DateColumn("Applied Date"),
+            }
         )
     else:
         st.info("No active applications yet. Go to the 'Add / Edit' tab to add one!")
 
 # --- TAB 2: ADD / EDIT APPLICATION ---
 with tab2:
-    # Toggle between Add and Edit mode
     mode = st.radio("Select Mode", ["Add New Application", "Update Existing Application"], horizontal=True)
     
+    def parse_date(date_str):
+        if date_str:
+            try:
+                return datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+            except ValueError:
+                return datetime.date.today()
+        return datetime.date.today()
+
     if mode == "Update Existing Application":
-        # Fetch existing apps for the dropdown
         conn = sqlite3.connect(DB_NAME)
         df_edit = pd.read_sql_query("SELECT id, company, title FROM applications WHERE is_archived=0 ORDER BY date_applied DESC", conn)
         conn.close()
@@ -81,30 +123,19 @@ with tab2:
         if df_edit.empty:
             st.warning("No applications to edit. Add some first!")
         else:
-            # Create a list of options for the selectbox
             app_options = [f"ID {row['id']}: {row['company']} - {row['title']}" for _, row in df_edit.iterrows()]
             selected_app = st.selectbox("Select an application to edit", app_options)
-            
-            # Extract the ID from the selected string
             edit_id = int(selected_app.split(" ")[1].replace(":", ""))
             
-            # Fetch the full details of the selected application
             conn = sqlite3.connect(DB_NAME)
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM applications WHERE id=?", (edit_id,))
             row = cursor.fetchone()
             conn.close()
             
-            # Map DB columns to variables (handling potential None values and date parsing)
-            def parse_date(date_str):
-                if date_str:
-                    try:
-                        return datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
-                    except ValueError:
-                        return datetime.date.today()
-                return datetime.date.today()
-
-            # Pre-populate the form (Not using st.form here so fields update immediately on selection)
+            # row indices: 0:id, 1:company, 2:title, 3:date_applied, 4:next_appt_date, 5:salary, 6:location, 
+            # 7:contact_name, 8:contact_email, 9:jd_link, 10:resume_link, 11:stage, 12:status, 13:updated, 14:archived
+            
             st.divider()
             col1, col2 = st.columns(2)
             
@@ -112,21 +143,22 @@ with tab2:
                 e_company = st.text_input("Company*", value=row[1] or "")
                 e_title = st.text_input("Job Title*", value=row[2] or "")
                 e_date_applied = st.date_input("Date Applied", value=parse_date(row[3]))
-                e_salary = st.text_input("Salary Range", value=row[4] or "")
-                e_location = st.text_input("Location / Remote", value=row[5] or "")
+                e_next_appt = st.date_input("Next Appointment/Follow-up Date", value=parse_date(row[4]))
+                e_salary = st.text_input("Salary Range", value=row[5] or "")
                 
             with col2:
-                e_contact_name = st.text_input("Recruiter Name", value=row[6] or "")
-                e_contact_email = st.text_input("Recruiter Email", value=row[7] or "")
-                status_options = ["Applied", "Phone Screen", "Technical", "Final Interview", "Offer", "Rejected", "Withdrawn"]
-                # Find the index of the current status to set the default in selectbox
-                current_status = row[11] or "Applied"
-                default_status_idx = status_options.index(current_status) if current_status in status_options else 0
-                e_status = st.selectbox("Status", status_options, index=default_status_idx)
-                e_interview_stage = st.text_input("Interview Stage", value=row[10] or "")
+                e_location = st.text_input("Location / Remote", value=row[6] or "")
+                e_contact_name = st.text_input("Recruiter Name", value=row[7] or "")
+                e_contact_email = st.text_input("Recruiter Email", value=row[8] or "")
+                e_interview_stage = st.text_input("Interview Stage", value=row[11] or "")
                 
-            e_jd_link = st.text_input("Job Description Link", value=row[8] or "")
-            e_resume_link = st.text_input("Resume/Cover Letter Link", value=row[9] or "")
+            status_options = ["Applied", "Phone Screen", "Technical", "Final Interview", "Offer", "Rejected", "Withdrawn"]
+            current_status = row[12] or "Applied"
+            default_status_idx = status_options.index(current_status) if current_status in status_options else 0
+            e_status = st.selectbox("Status", status_options, index=default_status_idx)
+                
+            e_jd_link = st.text_input("Job Description Link", value=row[9] or "")
+            e_resume_link = st.text_input("Resume/Cover Letter Link", value=row[10] or "")
             
             col_btn1, col_btn2 = st.columns(2)
             with col_btn1:
@@ -138,10 +170,10 @@ with tab2:
                         cursor = conn.cursor()
                         today = datetime.date.today().strftime('%Y-%m-%d')
                         cursor.execute('''
-                            UPDATE applications SET company=?, title=?, date_applied=?, salary_range=?, location=?,
+                            UPDATE applications SET company=?, title=?, date_applied=?, next_appt_date=?, salary_range=?, location=?,
                             contact_name=?, contact_email=?, jd_link=?, resume_link=?, interview_stage=?, status=?, date_updated=?
                             WHERE id=?
-                        ''', (e_company, e_title, str(e_date_applied), e_salary, e_location, 
+                        ''', (e_company, e_title, str(e_date_applied), str(e_next_appt), e_salary, e_location, 
                               e_contact_name, e_contact_email, e_jd_link, e_resume_link, 
                               e_interview_stage, e_status, today, edit_id))
                         conn.commit()
@@ -160,7 +192,6 @@ with tab2:
                     st.rerun()
 
     elif mode == "Add New Application":
-        # Original Add Form
         with st.form("job_form"):
             col1, col2 = st.columns(2)
             
@@ -168,19 +199,20 @@ with tab2:
                 company = st.text_input("Company*")
                 title = st.text_input("Job Title*")
                 date_applied = st.date_input("Date Applied", datetime.date.today())
+                next_appt = st.date_input("Next Appointment/Follow-up Date", value=None)
                 salary = st.text_input("Salary Range")
-                location = st.text_input("Location / Remote")
                 
             with col2:
+                location = st.text_input("Location / Remote")
                 contact_name = st.text_input("Recruiter Name")
                 contact_email = st.text_input("Recruiter Email")
-                status = st.selectbox("Status", ["Applied", "Phone Screen", "Technical", "Final Interview", "Offer", "Rejected", "Withdrawn"])
                 interview_stage = st.text_input("Interview Stage")
+                status = st.selectbox("Status", ["Applied", "Phone Screen", "Technical", "Final Interview", "Offer", "Rejected", "Withdrawn"])
                 
             jd_link = st.text_input("Job Description Link")
             resume_link = st.text_input("Resume/Cover Letter Link")
             
-            submitted = st.form_submit_button("➕ Add Application")
+            submitted = st.form_submit_button("➕ Add Application", use_container_width=True)
             if submitted:
                 if not company or not title:
                     st.error("Company and Title are required!")
@@ -188,11 +220,15 @@ with tab2:
                     conn = sqlite3.connect(DB_NAME)
                     cursor = conn.cursor()
                     today = datetime.date.today().strftime('%Y-%m-%d')
+                    
+                    # Handle empty next_appt date
+                    next_appt_str = str(next_appt) if next_appt else None
+                    
                     cursor.execute('''
-                        INSERT INTO applications (company, title, date_applied, salary_range, location, 
+                        INSERT INTO applications (company, title, date_applied, next_appt_date, salary_range, location, 
                         contact_name, contact_email, jd_link, resume_link, interview_stage, status, date_updated, is_archived)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-                    ''', (company, title, str(date_applied), salary, location, contact_name, contact_email, 
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    ''', (company, title, str(date_applied), next_appt_str, salary, location, contact_name, contact_email, 
                           jd_link, resume_link, interview_stage, status, today))
                     conn.commit()
                     conn.close()
